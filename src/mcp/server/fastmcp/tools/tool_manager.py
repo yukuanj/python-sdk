@@ -52,6 +52,7 @@ class ToolManager:
         icons: list[Icon] | None = None,
         meta: dict[str, Any] | None = None,
         structured_output: bool | None = None,
+        required_scopes: list[str] | None = None,
     ) -> Tool:
         """Add a tool to the server."""
         tool = Tool.from_function(
@@ -63,6 +64,7 @@ class ToolManager:
             icons=icons,
             meta=meta,
             structured_output=structured_output,
+            required_scopes=required_scopes,
         )
         existing = self._tools.get(tool.name)
         if existing:

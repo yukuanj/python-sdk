@@ -38,7 +38,9 @@ See SseServerTransport class documentation for more details.
 """
 
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID, uuid4
@@ -48,10 +50,15 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from pydantic import ValidationError
 from sse_starlette import EventSourceResponse
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
 import mcp.types as types
+from mcp.server.auth.tool_scopes import (
+    AuthorizationResult,
+    build_www_authenticate_header,
+    check_tool_authorization,
+)
 from mcp.server.transport_security import (
     TransportSecurityMiddleware,
     TransportSecuritySettings,
@@ -76,8 +83,14 @@ class SseServerTransport:
     _endpoint: str
     _read_stream_writers: dict[UUID, MemoryObjectSendStream[SessionMessage | Exception]]
     _security: TransportSecurityMiddleware
+    _tool_scope_lookup: Callable[[str], list[str] | None] | None
 
-    def __init__(self, endpoint: str, security_settings: TransportSecuritySettings | None = None) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        security_settings: TransportSecuritySettings | None = None,
+        tool_scope_lookup: Callable[[str], list[str] | None] | None = None,
+    ) -> None:
         """
         Creates a new SSE server transport, which will direct the client to POST
         messages to the relative path given.
@@ -116,6 +129,7 @@ class SseServerTransport:
         self._endpoint = endpoint
         self._read_stream_writers = {}
         self._security = TransportSecurityMiddleware(security_settings)
+        self._tool_scope_lookup = tool_scope_lookup
         logger.debug(f"SseServerTransport initialized with endpoint: {endpoint}")
 
     @asynccontextmanager
@@ -239,6 +253,51 @@ class SseServerTransport:
             await response(scope, receive, send)
             await writer.send(err)
             return
+
+        # Check tool-level authorization for tools/call requests
+        if (
+            isinstance(message.root, types.JSONRPCRequest)
+            and message.root.method == "tools/call"
+            and message.root.params is not None
+            and self._tool_scope_lookup is not None
+        ):
+            # Extract tool name from request params (JSONRPCRequest.params is dict[str, Any] | None)
+            tool_name = message.root.params.get("name") if isinstance(message.root.params, dict) else None
+
+            if tool_name:
+                # Look up tool's required scopes
+                required_scopes = self._tool_scope_lookup(tool_name)
+                if required_scopes:
+                    # Check authorization
+                    auth_result, missing_scope = check_tool_authorization(required_scopes)
+                    if auth_result == AuthorizationResult.MISSING_AUTH:
+                        # Return 401 with WWW-Authenticate header
+                        www_auth_header = build_www_authenticate_header(
+                            error="invalid_token",
+                            error_description="Authentication required",
+                            required_scopes=required_scopes,
+                        )
+                        response = JSONResponse(
+                            {"error": "invalid_token", "error_description": "Authentication required"},
+                            status_code=HTTPStatus.UNAUTHORIZED,
+                            headers={"WWW-Authenticate": www_auth_header},
+                        )
+                        await response(scope, receive, send)
+                        return
+                    elif auth_result == AuthorizationResult.INSUFFICIENT_SCOPE:
+                        # Return 403 with WWW-Authenticate header
+                        www_auth_header = build_www_authenticate_header(
+                            error="insufficient_scope",
+                            error_description=f"Required scope: {missing_scope}",
+                            required_scopes=required_scopes,
+                        )
+                        response = JSONResponse(
+                            {"error": "insufficient_scope", "error_description": f"Required scope: {missing_scope}"},
+                            status_code=HTTPStatus.FORBIDDEN,
+                            headers={"WWW-Authenticate": www_auth_header},
+                        )
+                        await response(scope, receive, send)
+                        return
 
         # Pass the ASGI scope for framework-agnostic access to request data
         metadata = ServerMessageMetadata(request_context=request)

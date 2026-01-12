@@ -164,6 +164,7 @@ class StreamableHTTPSessionManager:
             is_json_response_enabled=self.json_response,
             event_store=None,  # No event store in stateless mode
             security_settings=self.security_settings,
+            tool_scope_lookup=lambda tool_name: self.app.get_tool_scopes(tool_name),
         )
 
         # Start server in a new task
@@ -226,6 +227,7 @@ class StreamableHTTPSessionManager:
                     is_json_response_enabled=self.json_response,
                     event_store=self.event_store,  # May be None (no resumability)
                     security_settings=self.security_settings,
+                    tool_scope_lookup=lambda tool_name: self.app.get_tool_scopes(tool_name),
                 )
 
                 assert http_transport.mcp_session_id is not None

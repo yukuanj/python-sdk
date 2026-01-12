@@ -65,6 +65,7 @@ class AnyUrlModel(RootModel[AnyUrl]):
 @dataclass
 class AuthorizationHandler:
     provider: OAuthAuthorizationServerProvider[Any, Any, Any]
+    valid_scopes: list[str] | None = None
 
     async def handle(self, request: Request) -> Response:
         # implements authorization requests for grant_type=code;
@@ -185,8 +186,26 @@ class AuthorizationHandler:
                 )
 
             # Validate scope - for scope errors, we can redirect
+            # Validate against server's valid_scopes if available, otherwise use client's registered scope
             try:
-                scopes = client.validate_scope(auth_request.scope)
+                if auth_request.scope is None:
+                    scopes = None
+                else:
+                    requested_scopes = auth_request.scope.split()
+                    # If valid_scopes is set, validate against server's valid scopes
+                    # (clients can request any valid scope, not just what they registered with)
+                    if self.valid_scopes is not None:
+                        valid_scopes_set = set(self.valid_scopes)
+                        requested_scopes_set = set(requested_scopes)
+                        invalid_scopes = requested_scopes_set - valid_scopes_set
+                        if invalid_scopes:
+                            raise InvalidScopeError(
+                                f"Requested scopes are not valid: {', '.join(invalid_scopes)}"
+                            )
+                        scopes = requested_scopes
+                    else:
+                        # Fall back to client's validate_scope if no server valid_scopes
+                        scopes = client.validate_scope(auth_request.scope)
             except InvalidScopeError as validation_error:
                 # For scope errors, redirect with error parameters
                 return await error_response(

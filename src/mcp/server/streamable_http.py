@@ -24,6 +24,11 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
+from mcp.server.auth.tool_scopes import (
+    AuthorizationResult,
+    build_www_authenticate_header,
+    check_tool_authorization,
+)
 from mcp.server.transport_security import (
     TransportSecurityMiddleware,
     TransportSecuritySettings,
@@ -36,6 +41,7 @@ from mcp.types import (
     INVALID_PARAMS,
     INVALID_REQUEST,
     PARSE_ERROR,
+    CallToolRequest,
     ErrorData,
     JSONRPCError,
     JSONRPCMessage,
@@ -140,6 +146,7 @@ class StreamableHTTPServerTransport:
         is_json_response_enabled: bool = False,
         event_store: EventStore | None = None,
         security_settings: TransportSecuritySettings | None = None,
+        tool_scope_lookup: Callable[[str], list[str] | None] | None = None,
     ) -> None:
         """
         Initialize a new StreamableHTTP server transport.
@@ -164,6 +171,7 @@ class StreamableHTTPServerTransport:
         self.is_json_response_enabled = is_json_response_enabled
         self._event_store = event_store
         self._security = TransportSecurityMiddleware(security_settings)
+        self._tool_scope_lookup = tool_scope_lookup
         self._request_streams: dict[
             RequestId,
             tuple[
@@ -403,6 +411,51 @@ class StreamableHTTPServerTransport:
                 await writer.send(session_message)
 
                 return
+
+            # Check tool-level authorization for tools/call requests
+            if (
+                isinstance(message.root, JSONRPCRequest)
+                and message.root.method == "tools/call"
+                and message.root.params is not None
+                and self._tool_scope_lookup is not None
+            ):
+                # Extract tool name from request params (JSONRPCRequest.params is dict[str, Any] | None)
+                tool_name = message.root.params.get("name") if isinstance(message.root.params, dict) else None
+
+                if tool_name:
+                    # Look up tool's required scopes
+                    required_scopes = self._tool_scope_lookup(tool_name)
+                    if required_scopes:
+                        # Check authorization
+                        auth_result, missing_scope = check_tool_authorization(required_scopes)
+                        if auth_result == AuthorizationResult.MISSING_AUTH:
+                            # Return 401 with WWW-Authenticate header
+                            www_auth_header = build_www_authenticate_header(
+                                error="invalid_token",
+                                error_description="Authentication required",
+                                required_scopes=required_scopes,
+                            )
+                            response = self._create_error_response(
+                                "Authentication required",
+                                HTTPStatus.UNAUTHORIZED,
+                                headers={"WWW-Authenticate": www_auth_header},
+                            )
+                            await response(scope, receive, send)
+                            return
+                        elif auth_result == AuthorizationResult.INSUFFICIENT_SCOPE:
+                            # Return 403 with WWW-Authenticate header
+                            www_auth_header = build_www_authenticate_header(
+                                error="insufficient_scope",
+                                error_description=f"Required scope: {missing_scope}",
+                                required_scopes=required_scopes,
+                            )
+                            response = self._create_error_response(
+                                f"Insufficient scope: {missing_scope}",
+                                HTTPStatus.FORBIDDEN,
+                                headers={"WWW-Authenticate": www_auth_header},
+                            )
+                            await response(scope, receive, send)
+                            return
 
             # Extract the request ID outside the try block for proper scope
             request_id = str(message.root.id)

@@ -35,6 +35,9 @@ class Tool(BaseModel):
     annotations: ToolAnnotations | None = Field(None, description="Optional annotations for the tool")
     icons: list[Icon] | None = Field(default=None, description="Optional list of icons for this tool")
     meta: dict[str, Any] | None = Field(default=None, description="Optional metadata for this tool")
+    required_scopes: list[str] | None = Field(
+        default=None, description="Optional list of OAuth scopes required to call this tool"
+    )
 
     @cached_property
     def output_schema(self) -> dict[str, Any] | None:
@@ -52,6 +55,7 @@ class Tool(BaseModel):
         icons: list[Icon] | None = None,
         meta: dict[str, Any] | None = None,
         structured_output: bool | None = None,
+        required_scopes: list[str] | None = None,
     ) -> Tool:
         """Create a Tool from a function."""
         func_name = name or fn.__name__
@@ -84,6 +88,7 @@ class Tool(BaseModel):
             annotations=annotations,
             icons=icons,
             meta=meta,
+            required_scopes=required_scopes,
         )
 
     async def run(

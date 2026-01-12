@@ -388,6 +388,7 @@ class FastMCP(Generic[LifespanResultT]):
         icons: list[Icon] | None = None,
         meta: dict[str, Any] | None = None,
         structured_output: bool | None = None,
+        required_scopes: list[str] | None = None,
     ) -> None:
         """Add a tool to the server.
 
@@ -405,7 +406,7 @@ class FastMCP(Generic[LifespanResultT]):
                 - If True, creates a structured tool (return type annotation permitting)
                 - If False, unconditionally creates an unstructured tool
         """
-        self._tool_manager.add_tool(
+        tool = self._tool_manager.add_tool(
             fn,
             name=name,
             title=title,
@@ -414,7 +415,11 @@ class FastMCP(Generic[LifespanResultT]):
             icons=icons,
             meta=meta,
             structured_output=structured_output,
+            required_scopes=required_scopes,
         )
+        # Sync tool scopes to lowlevel server for transport-layer authorization
+        if tool.required_scopes:
+            self._mcp_server._tool_scopes[tool.name] = tool.required_scopes
 
     def remove_tool(self, name: str) -> None:
         """Remove a tool from the server by name.
@@ -436,6 +441,7 @@ class FastMCP(Generic[LifespanResultT]):
         icons: list[Icon] | None = None,
         meta: dict[str, Any] | None = None,
         structured_output: bool | None = None,
+        required_scopes: list[str] | None = None,
     ) -> Callable[[AnyFunction], AnyFunction]:
         """Decorator to register a tool.
 
@@ -477,6 +483,7 @@ class FastMCP(Generic[LifespanResultT]):
         def decorator(fn: AnyFunction) -> AnyFunction:
             self.add_tool(
                 fn,
+                required_scopes=required_scopes,
                 name=name,
                 title=title,
                 description=description,
@@ -808,6 +815,7 @@ class FastMCP(Generic[LifespanResultT]):
         sse = SseServerTransport(
             normalized_message_endpoint,
             security_settings=self.settings.transport_security,
+            tool_scope_lookup=lambda tool_name: self._mcp_server.get_tool_scopes(tool_name),
         )
 
         async def handle_sse(scope: Scope, receive: Receive, send: Send):
@@ -983,12 +991,23 @@ class FastMCP(Generic[LifespanResultT]):
                 # Build compliant metadata URL for WWW-Authenticate header
                 resource_metadata_url = build_resource_metadata_url(self.settings.auth.resource_server_url)
 
-            routes.append(
-                Route(
-                    self.settings.streamable_http_path,
-                    endpoint=RequireAuthMiddleware(streamable_http_app, required_scopes, resource_metadata_url),
+            # Only use RequireAuthMiddleware for server-level scopes (when required_scopes is non-empty)
+            # For tool-level scopes (when required_scopes is empty), let the transport layer handle authorization
+            if required_scopes:
+                routes.append(
+                    Route(
+                        self.settings.streamable_http_path,
+                        endpoint=RequireAuthMiddleware(streamable_http_app, required_scopes, resource_metadata_url),
+                    )
                 )
-            )
+            else:
+                # Tool-level authorization: use authentication middleware only, let transport layer handle scope checks
+                routes.append(
+                    Route(
+                        self.settings.streamable_http_path,
+                        endpoint=streamable_http_app,
+                    )
+                )
         else:
             # Auth is disabled, no wrapper needed
             routes.append(

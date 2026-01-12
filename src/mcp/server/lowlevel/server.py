@@ -154,6 +154,8 @@ class Server(Generic[LifespanResultT, RequestT]):
         }
         self.notification_handlers: dict[type, Callable[..., Awaitable[None]]] = {}
         self._tool_cache: dict[str, types.Tool] = {}
+        # Tool-level scope storage: tool_name -> list of required scopes
+        self._tool_scopes: dict[str, list[str]] = {}
         logger.debug("Initializing server %r", name)
 
     def create_initialization_options(
@@ -462,11 +464,26 @@ class Server(Generic[LifespanResultT, RequestT]):
 
         return tool
 
-    def call_tool(self, *, validate_input: bool = True):
+    def get_tool_scopes(self, tool_name: str) -> list[str] | None:
+        """
+        Get required scopes for a tool.
+
+        Args:
+            tool_name: Name of the tool
+
+        Returns:
+            List of required scopes, or None if no scopes are required
+        """
+        return self._tool_scopes.get(tool_name)
+
+    def call_tool(self, *, validate_input: bool = True, required_scopes: list[str] | None = None):
         """Register a tool call handler.
 
         Args:
             validate_input: If True, validates input against inputSchema. Default is True.
+            required_scopes: Optional list of OAuth scopes required to call tools handled by this decorator.
+                Note: Tool-level scope checking only applies to HTTP transports (SSE, streamable-http).
+                For per-tool scopes, tools should be listed via list_tools() with scope information.
 
         The handler validates input against inputSchema (if validate_input=True), calls the tool function,
         and builds a CallToolResult with the results:
@@ -484,12 +501,21 @@ class Server(Generic[LifespanResultT, RequestT]):
             ],
         ):
             logger.debug("Registering handler for CallToolRequest")
+            
+            # Store required_scopes for this handler (applies to all tools handled by this decorator)
+            # For per-tool scopes, use FastMCP or store scopes when tools are listed
+            handler_required_scopes = required_scopes
 
             async def handler(req: types.CallToolRequest):
                 try:
                     tool_name = req.params.name
                     arguments = req.params.arguments or {}
                     tool = await self._get_cached_tool_definition(tool_name)
+                    
+                    # Store tool scopes if provided (used by transport layer for authorization)
+                    # If tool-specific scopes are set, use those; otherwise use handler-level scopes
+                    if handler_required_scopes and tool_name not in self._tool_scopes:
+                        self._tool_scopes[tool_name] = handler_required_scopes
 
                     # input validation
                     if validate_input and tool:
