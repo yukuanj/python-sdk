@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple Notebook MCP Client example with OAuth authentication.
+Simple Notebook MCP Client with Aggregated Scope Handling.
 
 This client demonstrates:
 1. Connecting to the notebook server with OAuth
-2. Calling list_notes tool (triggers OAuth flow with 'read' scope if needed)
-3. Calling add_note tool (triggers OAuth flow with 'write' scope if needed)
+2. Calling list_tools() to discover available tools and their scope requirements
+3. Aggregating scope requirements for 'list_notes' and 'add_note' tools
+4. Requesting a token with all aggregated scopes upfront
+5. Calling both tools using the same token
 """
 
 import asyncio
@@ -101,7 +103,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
 class CallbackServer:
     """Simple server to handle OAuth callbacks."""
 
-    def __init__(self, port: int = 3030):
+    def __init__(self, port: int = 3031):
         self.port = port
         self.server: HTTPServer | None = None
         self.thread: threading.Thread | None = None
@@ -138,7 +140,7 @@ class CallbackServer:
         self.callback_data["authorization_code"] = None
         self.callback_data["state"] = None
         self.callback_data["error"] = None
-        
+
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self.callback_data["authorization_code"]:
@@ -154,17 +156,17 @@ class CallbackServer:
 
 
 async def main():
-    """Main entry point - demonstrates calling list_notes then add_note."""
+    """Main entry point - demonstrates aggregated scope handling."""
     # Default server URL - can be overridden with environment variable
     server_port = os.getenv("MCP_SERVER_PORT", "8001")
     server_url = f"http://localhost:{server_port}/mcp"
 
-    print("📓 Simple Notebook MCP Client")
+    print("📓 Simple Notebook MCP Client (Aggregated Scopes)")
     print(f"Connecting to: {server_url}")
     print()
 
     try:
-        callback_server = CallbackServer(port=3030)
+        callback_server = CallbackServer(port=3031)
         callback_server.start()
 
         async def callback_handler() -> tuple[str, str | None]:
@@ -174,8 +176,8 @@ async def main():
             return auth_code, callback_server.get_state()
 
         client_metadata_dict = {
-            "client_name": "Simple Notebook Client",
-            "redirect_uris": ["http://localhost:3030/callback"],
+            "client_name": "Simple Notebook Client (Aggregated)",
+            "redirect_uris": ["http://localhost:3031/callback"],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "client_secret_post",
@@ -207,14 +209,17 @@ async def main():
                 print("✨ Session initialization complete!")
                 print()
 
-                # Step 0: List available tools and their scope requirements
-                print("🔧 Step 0: Listing available tools and their scope requirements...")
+                # Step 1: List available tools and extract scope requirements
+                print("🔧 Step 1: Listing available tools and extracting scope requirements...")
                 try:
                     tools_result = await session.list_tools()
                     print("✅ list_tools succeeded!")
                     print()
 
-                    # Display tools and their scope requirements
+                    # Display tools and extract scopes for list_notes and add_note
+                    target_tools = {"list_notes", "add_note"}
+                    aggregated_scopes: set[str] = set()
+
                     if tools_result.tools:
                         print(f"📋 Found {len(tools_result.tools)} tool(s):")
                         for tool in tools_result.tools:
@@ -224,9 +229,33 @@ async def main():
                             print(f"    Description: {tool.description or 'N/A'}")
                             print(f"    Required scopes: {scope_str}")
                             print()
+
+                            # Collect scopes for target tools
+                            if tool.name in target_tools and scopes:
+                                aggregated_scopes.update(scopes)
                     else:
                         print("📋 No tools found.")
                         print()
+                        return
+
+                    # Step 2: Aggregate scopes and set in OAuth context
+                    if aggregated_scopes:
+                        aggregated_scopes_list = sorted(list(aggregated_scopes))
+                        scope_string = " ".join(aggregated_scopes_list)
+                        print(f"🔐 Step 2: Aggregating scopes for target tools: {', '.join(target_tools)}")
+                        print(f"   Aggregated scopes: {scope_string}")
+                        print()
+
+                        # Explicitly set the requested scope using the framework method
+                        # This ensures the OAuth flow requests all needed scopes upfront,
+                        # overriding any scope suggested by the server
+                        oauth_auth.set_requested_scope(scope_string)
+                        print(f"✅ Set OAuth client metadata scope to: {scope_string}")
+                        print()
+                    else:
+                        print("⚠️  No scopes found for target tools (list_notes, add_note)")
+                        print()
+
                 except Exception as e:
                     print(f"❌ Failed to call list_tools: {e}")
                     import traceback
@@ -234,8 +263,8 @@ async def main():
                     traceback.print_exc()
                     return
 
-                # Step 1: Call list_notes
-                print("📋 Step 1: Calling list_notes tool...")
+                # Step 3: Call list_notes (will trigger OAuth with aggregated scopes)
+                print("📋 Step 3: Calling list_notes tool...")
                 try:
                     list_result = await session.call_tool("list_notes", {})
                     print("✅ list_notes succeeded!")
@@ -246,7 +275,6 @@ async def main():
                     if hasattr(list_result, "content"):
                         for content in list_result.content:
                             if content.type == "text":
-                                # Parse JSON from text content
                                 try:
                                     result_data = json.loads(content.text)
                                     notes = result_data.get("notes", [])
@@ -267,16 +295,15 @@ async def main():
                     else:
                         print("📝 No notes found.")
                         print()
-                    
-                    time.sleep(5)
-                    # Step 2: Call add_note (requires 'write' scope)
-                    print("✏️  Step 2: Calling add_note tool (requires 'write' scope)...")
+
+                    # Step 4: Call add_note (should use same token with aggregated scopes)
+                    print("✏️  Step 4: Calling add_note tool (requires 'write' scope from aggregated scopes)...")
                     try:
                         add_result = await session.call_tool(
                             "add_note",
                             {
-                                "title": "My New Note",
-                                "content": "This note was added by the client example!",
+                                "title": "My New Note (Aggregated)",
+                                "content": "This note was added using the aggregated scope client!",
                             },
                         )
                         print("✅ add_note succeeded!")
@@ -317,7 +344,7 @@ async def main():
         traceback.print_exc()
     finally:
         # Stop the callback server when done
-        if 'callback_server' in locals():
+        if "callback_server" in locals():
             callback_server.stop()
 
 

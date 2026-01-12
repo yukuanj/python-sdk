@@ -10,6 +10,7 @@ members = [
     "mcp-simple-chatbot",
     "mcp-simple-notebook",
     "mcp-simple-notebook-client",
+    "mcp-simple-notebook-client-aggregated",
     "mcp-simple-pagination",
     "mcp-simple-prompt",
     "mcp-simple-resource",
@@ -892,6 +893,35 @@ dev = [
 name = "mcp-simple-notebook-client"
 version = "0.1.0"
 source = { editable = "examples/clients/simple-notebook-client" }
+dependencies = [
+    { name = "click" },
+    { name = "mcp" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.2.0" },
+    { name = "mcp", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyright", specifier = ">=1.1.379" },
+    { name = "pytest", specifier = ">=8.3.3" },
+    { name = "ruff", specifier = ">=0.6.9" },
+]
+
+[[package]]
+name = "mcp-simple-notebook-client-aggregated"
+version = "0.1.0"
+source = { editable = "examples/clients/simple-notebook-client-aggregated" }
 dependencies = [
     { name = "click" },
     { name = "mcp" },

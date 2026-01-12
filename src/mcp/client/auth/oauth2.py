@@ -112,6 +112,11 @@ class OAuthContext:
     discovery_base_url: str | None = None
     discovery_pathname: str | None = None
 
+    # Client-specified scope (for aggregated scopes, etc.)
+    # If True, the scope in client_metadata.scope was explicitly set by the client
+    # and should take priority over discovered scopes (WWW-Authenticate, PRM)
+    explicit_scope_set: bool = False
+
     def get_authorization_base_url(self, server_url: str) -> str:
         """Extract base URL by removing path component."""
         parsed = urlparse(server_url)
@@ -204,6 +209,20 @@ class OAuthClientProvider(httpx.Auth):
         )
         self._initialized = False
 
+    def set_requested_scope(self, scope: str) -> None:
+        """
+        Explicitly set the scope to request during OAuth flow.
+        
+        This method allows clients to specify a scope (e.g., aggregated scopes)
+        that will be used during the OAuth flow, overriding any scope suggested
+        by the server in WWW-Authenticate headers or Protected Resource Metadata.
+        
+        Args:
+            scope: Space-separated scope string (e.g., "read write")
+        """
+        self.context.client_metadata.scope = scope
+        self.context.explicit_scope_set = True
+
     def _extract_field_from_www_auth(self, init_response: httpx.Response, field_name: str) -> str | None:
         """
         Extract field from WWW-Authenticate header.
@@ -274,24 +293,41 @@ class OAuthClientProvider(httpx.Auth):
 
     def _select_scopes(self, init_response: httpx.Response) -> None:
         """Select scopes as outlined in the 'Scope Selection Strategy in the MCP spec."""
+        # If scope is explicitly set by the client (e.g., for aggregated scopes),
+        # it takes highest priority and we skip the discovery-based selection
+        if self.context.explicit_scope_set and self.context.client_metadata.scope:
+            # Client explicitly requested a specific scope - use it
+            # This allows clients to request aggregated scopes even if the server
+            # suggests a different scope in WWW-Authenticate header
+            return
+
+        existing_scope = self.context.client_metadata.scope
+        
         # Per MCP spec, scope selection priority order:
         # 1. Use scope from WWW-Authenticate header (if provided)
         # 2. Use all scopes from PRM scopes_supported (if available)
-        # 3. Omit scope parameter if neither is available
+        # 3. Preserve existing scope if previously set
+        # 4. Omit scope parameter if none of the above
         #
         www_authenticate_scope = self._extract_scope_from_www_auth(init_response)
         if www_authenticate_scope is not None:
             # Priority 1: WWW-Authenticate header scope
             self.context.client_metadata.scope = www_authenticate_scope
+            self.context.explicit_scope_set = False  # Clear explicit flag since we're using discovered scope
         elif (
             self.context.protected_resource_metadata is not None
             and self.context.protected_resource_metadata.scopes_supported is not None
         ):
             # Priority 2: PRM scopes_supported
             self.context.client_metadata.scope = " ".join(self.context.protected_resource_metadata.scopes_supported)
+            self.context.explicit_scope_set = False  # Clear explicit flag since we're using discovered scope
+        elif existing_scope is not None:
+            # Priority 3: Preserve existing scope if previously set
+            self.context.client_metadata.scope = existing_scope
         else:
-            # Priority 3: Omit scope parameter
+            # Priority 4: Omit scope parameter
             self.context.client_metadata.scope = None
+            self.context.explicit_scope_set = False
 
     def _get_discovery_urls(self) -> list[str]:
         """Generate ordered list of (url, type) tuples for discovery attempts."""

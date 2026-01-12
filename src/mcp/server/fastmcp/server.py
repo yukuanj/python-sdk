@@ -310,7 +310,10 @@ class FastMCP(Generic[LifespanResultT]):
                 outputSchema=info.output_schema,
                 annotations=info.annotations,
                 icons=info.icons,
-                _meta=info.meta,
+                _meta={
+                    **(info.meta or {}),
+                    **({"required_scopes": info.required_scopes} if info.required_scopes else {}),
+                },
             )
             for info in tools
         ]
